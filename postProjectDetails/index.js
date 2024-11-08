@@ -1,28 +1,12 @@
-// projects-upload/index.js
 const mysql = require('mysql2/promise');
+const { getDbConfig } = require('../dbConfig');
 
-// Configure MySQL connection using environment variables
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'Innover@2024',
-  database: process.env.DB_SCHEMA_RMS || 'rms',
-  ssl: {
-    rejectUnauthorized: false // Use an appropriate certificate authority if required
-  },
-};
+const pool = mysql.createPool(getDbConfig());
 
-// Create a MySQL connection pool
-const pool = mysql.createPool(dbConfig);
-
-// Utility function to convert empty fields to null
 const emptyToNull = (value) => (value === '' || value === 'NULL' ? null : value);
-
-// Allowed Project Statuses
 const allowedProjectStatuses = ['Completed', 'In Progress', 'On Hold'];
 
 module.exports = async function (context, req) {
-  // Check if request body exists and is an array
   if (!req.body || !Array.isArray(req.body)) {
     context.res = {
       status: 400,
@@ -32,9 +16,16 @@ module.exports = async function (context, req) {
   }
 
   const projects = req.body;
-  const requiredFields = ['ProjectID', 'ProjectName', 'ClientID', 'ProjectStatus', 'ProjectManagerID', 'ProjectStartDate'];
+  const requiredFields = [
+    'ProjectID',
+    'ProjectName',
+    'ClientID',
+    'ProjectStatus',
+    'ProjectManagerID',
+    'ProjectStartDate',
+    'PlannedHeadcount',
+  ];
 
-  // Validate each project record
   const invalidRecords = projects.filter(project => 
     !requiredFields.every(field => project.hasOwnProperty(field) && project[field] !== undefined && project[field] !== null)
   );
@@ -61,9 +52,8 @@ module.exports = async function (context, req) {
       const successes = [];
       const failures = [];
 
-      for (const [index, project] of projects.entries()) {
+      for (const project of projects) {
         try {
-          // Extract project details and convert empty values to null
           const ProjectID = emptyToNull(project.ProjectID);
           const ProjectName = emptyToNull(project.ProjectName);
           const ClientID = emptyToNull(project.ClientID);
@@ -72,13 +62,18 @@ module.exports = async function (context, req) {
           const ProjectManagerID = emptyToNull(project.ProjectManagerID);
           const ProjectStartDate = emptyToNull(project.ProjectStartDate);
           const ProjectEndDate = emptyToNull(project.ProjectEndDate);
+          const ProjectStudio = emptyToNull(project.ProjectStudio);
+          const ProjectSubStudio = emptyToNull(project.ProjectSubStudio);
+          const PlannedHeadcount = emptyToNull(project.PlannedHeadcount);
 
-          // Validate ProjectStatus
           if (!allowedProjectStatuses.includes(ProjectStatus)) {
             throw new Error(`Invalid ProjectStatus: ${ProjectStatus}. Allowed values are ${allowedProjectStatuses.join(', ')}.`);
           }
 
-          // Check if ClientID exists
+          if (PlannedHeadcount !== null && (!Number.isInteger(PlannedHeadcount) || PlannedHeadcount < 0)) {
+            throw new Error(`Invalid PlannedHeadcount: ${PlannedHeadcount}. It must be a non-negative integer.`);
+          }
+
           const [existingClient] = await connection.query(
             'SELECT ClientID FROM Clients WHERE ClientID = ?',
             [ClientID]
@@ -88,7 +83,6 @@ module.exports = async function (context, req) {
             throw new Error(`ClientID ${ClientID} does not exist in Clients table.`);
           }
 
-          // Check if ProjectManagerID exists and fetch EmployeeName
           const [existingEmployee] = await connection.query(
             'SELECT EmployeeName FROM Employees WHERE EmployeeId = ?',
             [ProjectManagerID]
@@ -100,14 +94,12 @@ module.exports = async function (context, req) {
 
           const ProjectManager = existingEmployee[0].EmployeeName;
 
-          // Check if ProjectID exists
           const [existingProject] = await connection.query(
             'SELECT ProjectID FROM Projects WHERE ProjectID = ?',
             [ProjectID]
           );
 
           if (existingProject.length > 0) {
-            // Update existing project
             const updateQuery = `
               UPDATE Projects 
               SET 
@@ -118,11 +110,14 @@ module.exports = async function (context, req) {
                 ProjectManagerID = ?,
                 ProjectManager = ?,
                 ProjectStartDate = ?,
-                ProjectEndDate = ?
+                ProjectEndDate = ?,
+                ProjectStudio = ?,
+                ProjectSubStudio = ?,
+                PlannedHeadcount = ?
               WHERE ProjectID = ?
             `;
 
-            const updateParams = [
+            const [updateResult] = await connection.query(updateQuery, [
               ProjectName,
               ClientID,
               ProjectStatus,
@@ -131,17 +126,17 @@ module.exports = async function (context, req) {
               ProjectManager,
               formatDate(ProjectStartDate),
               formatDate(ProjectEndDate),
+              ProjectStudio,
+              ProjectSubStudio,
+              PlannedHeadcount,
               ProjectID
-            ];
+            ]);
 
-            const [updateResult] = await connection.query(updateQuery, updateParams);
-
-            // Check if the update was successful
             if (updateResult.affectedRows === 0) {
               throw new Error(`No rows affected for ProjectID: ${ProjectID}.`);
             }
           } else {
-            // Insert new project
+            // Fixed INSERT query with correct number of placeholders
             const insertQuery = `
               INSERT INTO Projects (
                 ProjectID,
@@ -152,11 +147,14 @@ module.exports = async function (context, req) {
                 ProjectManagerID,
                 ProjectManager,
                 ProjectStartDate,
-                ProjectEndDate
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ProjectEndDate,
+                ProjectStudio,
+                ProjectSubStudio,
+                PlannedHeadcount
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
-            const insertParams = [
+            await connection.query(insertQuery, [
               ProjectID,
               ProjectName,
               ClientID,
@@ -165,10 +163,11 @@ module.exports = async function (context, req) {
               ProjectManagerID,
               ProjectManager,
               formatDate(ProjectStartDate),
-              formatDate(ProjectEndDate)
-            ];
-
-            await connection.query(insertQuery, insertParams);
+              formatDate(ProjectEndDate),
+              ProjectStudio,
+              ProjectSubStudio,
+              PlannedHeadcount
+            ]);
           }
 
           processedRecords += 1;
@@ -214,14 +213,12 @@ module.exports = async function (context, req) {
   }
 };
 
-// Helper function to format dates to MySQL DATE format (YYYY-MM-DD)
 function formatDate(dateString) {
   if (!dateString) return null;
-  // Handle various date formats, e.g., "15/01/24", "01/08/25", "NULL"
   const date = new Date(dateString);
   if (isNaN(date.getTime())) return null;
   const year = date.getFullYear();
-  const month = (`0${date.getMonth() + 1}`).slice(-2); // Months are zero-based
+  const month = (`0${date.getMonth() + 1}`).slice(-2);
   const day = (`0${date.getDate()}`).slice(-2);
   return `${year}-${month}-${day}`;
 }
