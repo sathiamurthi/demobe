@@ -1,0 +1,83 @@
+# Node.js Function App to Linux on Azure
+# This pipeline builds a Node.js function app and deploys it to Azure as a Linux function app.
+# For more details, see: https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+trigger:
+- develop
+
+variables:
+  # Azure Resource Manager connection created during pipeline creation
+  azureSubscription: 'Timesheet Application'
+
+  # Function app name
+  functionAppName: 'dev-innover-rms'
+
+  # Environment name
+  environmentName: 'dev-innover-rms'
+
+  # Agent VM image name
+  vmImageName: 'ubuntu-latest'
+
+stages:
+- stage: Build
+  displayName: Build stage
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: $(vmImageName)
+
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '20.x'
+      displayName: 'Install Node.js'
+
+    - script: |
+        if [ -f extensions.csproj ]
+        then
+            dotnet build extensions.csproj --runtime ubuntu.16.04-x64 --output ./bin
+        fi
+      displayName: 'Build extensions'
+
+    - script: |
+        npm install
+        npm install mysql2 --force
+        npm install lru-cache --force
+        npm run build --if-present
+        npm run test --if-present
+      displayName: 'Prepare binaries'
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive files'
+      inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+        replaceExistingArchive: true
+
+    - upload: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+      artifact: drop
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    environment: $(environmentName)
+    pool:
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureFunctionApp@1
+            displayName: 'Azure Functions App Deploy DEV: dev-innover-rms'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              appType: functionAppLinux
+              appName: $(functionAppName)
+              package: '$(Pipeline.Workspace)/drop/$(Build.BuildId).zip'
